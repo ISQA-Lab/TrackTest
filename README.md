@@ -68,6 +68,20 @@ We have uploaded high-definition GIF examples (`GIF.rar`) and the corresponding 
 
 
 
+
+
+## **Experimental Data**
+
+All experimental data is stored at:
+
+https://drive.google.com/drive/folders/1SoeTrFn7AuWfXlLqX3ka8jv3sw30e-Ij?usp=drive_link
+
+
+
+
+
+
+
 ## Experimental Results
 
 ------
