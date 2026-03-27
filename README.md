@@ -80,7 +80,7 @@ including:
 
 RQ1: High-definition GIF examples(RQ1_gif_example.rar) and corresponding point cloud-image data(RQ1_example_data.zip);
 
-data.zip:
+data.zip: trajectories
 
 seed.rar: Required experiment seed files
 
