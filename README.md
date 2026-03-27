@@ -76,11 +76,11 @@ The all data required to reproduce the experiments is stored at::
 
 https://drive.google.com/drive/folders/1SoeTrFn7AuWfXlLqX3ka8jv3sw30e-Ij?usp=drive_link
 
-including:
+Including:
 
 RQ1: High-definition GIF examples(RQ1_gif_example.rar) and corresponding point cloud-image data(RQ1_example_data.zip);
 
-data.zip: trajectories
+data.zip: Trajectories
 
 seed.rar: Required experiment seed files
 
