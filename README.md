@@ -106,13 +106,21 @@ Low-resolution GIF examples have been uploaded to GitHub, and high-resolution GI
 
 To run the trajectory generation path,you should excute like this.
 
+this loads the seq=1 scene from scene_factory.py, applies runtime overrides (for example --start_road_idx if provided), calls generate_cut_in(...) in cut_in_common.py to sample and solve feasible motion constraints, then exports trajectory artifacts (intermediate .pkl/.npy plus transferred final outputs), where a return code of 0 means success and -1 means the current trial is unsatisfied (use --retry to keep trying until success).
+
+
+
+```
 python with_npc_cut_in.py --seq 1 --uid 0 --save_dir outputs/cut_in
 
 or keep retrying until a feasible solution is found:
 
 python with_npc_cut_in.py --seq 1 --uid 0 --save_dir outputs/cut_in --retry
+```
 
-this loads the seq=1 scene from scene_factory.py, applies runtime overrides (for example --start_road_idx if provided), calls generate_cut_in(...) in cut_in_common.py to sample and solve feasible motion constraints, then exports trajectory artifacts (intermediate .pkl/.npy plus transferred final outputs), where a return code of 0 means success and -1 means the current trial is unsatisfied (use --retry to keep trying until success).
+------
+
+
 
 ------
 
@@ -123,6 +131,9 @@ this loads the seq=1 scene from scene_factory.py, applies runtime overrides (for
 To compute the priority score for one trajectory, run the unified metric entry with the trajectory file and optional metric inputs.
 This call evaluates available sub-metrics (angle, jerk, distance, occlusion, truncation) and returns a merged composite_score, which can be used as the trajectory priority score (higher means higher priority).
 
+
+
+```
 python -m metric.metric_entry \
   --npy-path data/your_traj.npy \
   --theta-thresh 0.1*pi \
@@ -139,6 +150,11 @@ python -m metric.metric_entry \
   --truncation-folder-path data/truncation \
   --truncation-trajectory-path data/your_traj.npy \
   --weights "{\"angle_score\":1,\"jerk_score\":1,\"distance_score\":1,\"occlusion_score\":1,\"truncation_score\":1}"
+```
+
+------
+
+
 
 ------
 
@@ -147,10 +163,3 @@ python -m metric.metric_entry \
 ### RQ3: Ablation Study
 
 To obtain the results for RQ3, first follow the same procedure used in RQ2 to compute trajectory scores. Then, rank all trajectories based on each individual metric score (e.g., distance, angle, jerk, occlusion, truncation) separately rather than using only a combined score. Finally, perform a correlation analysis between these metric-based rankings (or scores) and the corresponding test outcomes to quantify how strongly each metric is associated with actual performance and to identify which metric is most predictive.
-
-```
-
-```
-
-------
-
