@@ -1,0 +1,411 @@
+import os
+import random
+import time
+import pickle
+import shutil
+from z3 import Solver, Real, If, Or, sat, set_option
+
+from utils.pathgenerate import pkl2npy
+from utils.util import get_value_of_z3
+
+
+def _sample_roadinfo(roadinfo, seconds_between_points):
+    sampled = []
+    lengths = []
+    for road in roadinfo:
+        sampled_road = []
+        for car in road:
+            sampled_car = car[::seconds_between_points]
+            sampled_road.append(sampled_car)
+            lengths.append(len(sampled_car))
+        sampled.append(sampled_road)
+    point_count = min(lengths) if lengths else 0
+    return sampled, point_count
+
+
+def _trim_to_point_count(roadinfo, point_count):
+    trimmed = []
+    for road in roadinfo:
+        trimmed_road = []
+        for car in road:
+            trimmed_road.append(car[:point_count])
+        trimmed.append(trimmed_road)
+    return trimmed
+
+
+def _get_derivative(getderivative, axis_value, ref_line):
+    try:
+        return getderivative(axis_value, ref_line)
+    except TypeError:
+        return getderivative(axis_value)
+
+
+def _add_heading_constraint(solver, vx, vy, derivative, curve_mode):
+    if curve_mode == "y_of_x":
+        solver.add(vx != 0)
+        solver.add(vy / vx == derivative[1] / derivative[0])
+    else:
+        solver.add(vy != 0)
+        solver.add(vx / vy == derivative[1] / derivative[0])
+
+
+def _add_order_constraint(solver, position, lane_cars, insert_point, step_idx, distance, forward_sign):
+    if lane_cars is None or len(lane_cars) == 0:
+        return
+
+    if insert_point == 0:
+        ref = lane_cars[0][step_idx]
+        bound = ref + distance if forward_sign > 0 else ref - distance
+        solver.add(position < bound if forward_sign > 0 else position > bound)
+        return
+
+    if insert_point >= len(lane_cars):
+        ref = lane_cars[-1][step_idx]
+        bound = ref + distance if forward_sign > 0 else ref - distance
+        solver.add(position > bound if forward_sign > 0 else position < bound)
+        return
+
+    prev_ref = lane_cars[insert_point - 1][step_idx]
+    next_ref = lane_cars[insert_point][step_idx]
+
+    prev_bound = prev_ref + distance if forward_sign > 0 else prev_ref - distance
+    next_bound = next_ref + distance if forward_sign > 0 else next_ref - distance
+
+    if forward_sign > 0:
+        solver.add(position > prev_bound)
+        solver.add(position < next_bound)
+    else:
+        solver.add(position < prev_bound)
+        solver.add(position > next_bound)
+
+
+def _resolve_npc_path(script_dir, npc):
+    candidates = [npc]
+    if script_dir:
+        candidates.append(os.path.join(script_dir, npc))
+        candidates.append(os.path.join(script_dir, "..", npc))
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _build_toggle_none_plan(point_count, init_road_idx, dst_road_idx, point_map, keep_prob=0.3, stay_frames=2, seed_mode="time"):
+    road_idx_lst = [init_road_idx]
+    t = 1
+
+    while t < point_count:
+        if seed_mode == "time":
+            random.seed(time.time())
+        else:
+            random.seed(t)
+
+        if random.random() > keep_prob:
+            for _ in range(stay_frames):
+                if t >= point_count:
+                    break
+                road_idx_lst.append(road_idx_lst[-1])
+                t += 1
+        else:
+            if t >= point_count:
+                break
+            road_idx_lst.append(None)
+            t += 1
+            if t >= point_count:
+                break
+            prev_idx = road_idx_lst[-2]
+            nxt = dst_road_idx if prev_idx == init_road_idx else init_road_idx
+            road_idx_lst.append(nxt)
+            t += 1
+
+    road_points = [None if idx is None else point_map[idx] for idx in road_idx_lst]
+    return road_idx_lst, road_points
+
+
+def _build_single_switch_plan(point_count, init_road_idx, dst_road_idx, point_map, switch_min=2):
+    switch_point = random.randint(switch_min, max(switch_min, point_count - 3))
+    road_idx_lst = []
+    for i in range(point_count):
+        if i < switch_point:
+            road_idx_lst.append(init_road_idx)
+        elif i == switch_point:
+            road_idx_lst.append(None)
+        else:
+            road_idx_lst.append(dst_road_idx)
+    road_points = [None if idx is None else point_map[idx] for idx in road_idx_lst]
+    return road_idx_lst, road_points
+
+
+def _build_alternate_no_none_plan(point_count, init_road_idx=0, min_stay=2, max_stay=5):
+    road_idx_lst = []
+    current = init_road_idx
+    i = 0
+    while i < point_count:
+        stay = random.randint(min_stay, max_stay)
+        for _ in range(stay):
+            if i >= point_count:
+                break
+            road_idx_lst.append(current)
+            i += 1
+        current = 1 - current
+    return road_idx_lst
+
+
+def generate_linechange(
+    uid,
+    save_dir,
+    seq,
+    frame_start,
+    roadinfo,
+    roads,
+    ego_idx,
+    script_dir,
+    getderivative,
+    npcs,
+    curve_mode="y_of_x",
+    forward_axis="x",
+    forward_sign=1,
+    init_road_idx=None,
+    dst_road_idx=None,
+    init_point=1,
+    dst_point=0,
+    speed_limit=80,
+    seconds_range=(3, 5),
+    save_distance_range=(30, 50),
+    timeout_ms=1000,
+    path_name_template="{seq}_linechange_{uid}",
+    ref_line=None,
+    extra_axis_constraints=None,
+    plan_mode="toggle_none_random",
+    keep_prob=0.3,
+    stay_frames=2,
+    seed_mode="time",
+    switch_min=2,
+    alternate_min_stay=2,
+    alternate_max_stay=5,
+    transition_axis_rules=None,
+    transition_use_both_lane_order=True,
+    no_none_switch_skip_lane=True,
+    no_none_or_clearance=True,
+):
+    seconds_between_points = random.randint(seconds_range[0], seconds_range[1])
+    print("seconds_between_points:", seconds_between_points)
+
+    sampled_roadinfo, point_count = _sample_roadinfo(roadinfo, seconds_between_points)
+    if point_count <= 2:
+        print("point_count too small")
+        return -1
+    sampled_roadinfo = _trim_to_point_count(sampled_roadinfo, point_count)
+    print("point_count:", point_count)
+
+    if init_road_idx is None:
+        init_road_idx = ego_idx
+
+    if dst_road_idx is None:
+        dst_road_idx = 1 - init_road_idx if len(roads) == 2 else init_road_idx
+
+    point_map = {init_road_idx: init_point, dst_road_idx: dst_point}
+
+    if plan_mode == "toggle_none_random":
+        road_idx_lst, road_point_lst = _build_toggle_none_plan(
+            point_count,
+            init_road_idx,
+            dst_road_idx,
+            point_map,
+            keep_prob=keep_prob,
+            stay_frames=stay_frames,
+            seed_mode=seed_mode,
+        )
+    elif plan_mode == "single_switch_with_none":
+        road_idx_lst, road_point_lst = _build_single_switch_plan(
+            point_count,
+            init_road_idx,
+            dst_road_idx,
+            point_map,
+            switch_min=switch_min,
+        )
+    elif plan_mode == "alternate_no_none":
+        road_idx_lst = _build_alternate_no_none_plan(
+            point_count,
+            init_road_idx=init_road_idx,
+            min_stay=alternate_min_stay,
+            max_stay=alternate_max_stay,
+        )
+        road_point_lst = [point_map.get(idx, init_point) for idx in road_idx_lst]
+    else:
+        print("unsupported plan_mode")
+        return -1
+
+    print("road_idx_lst:", road_idx_lst)
+
+    axis_idx = 0 if forward_axis == "x" else 1
+    save_distance = random.randint(save_distance_range[0], save_distance_range[1])
+
+    s = Solver()
+    s.reset()
+    waypoints = [
+        (
+            Real(f"x{i}"),
+            Real(f"y{i}"),
+            Real(f"x_speed{i}"),
+            Real(f"y_speed{i}"),
+            Real(f"x_acc{i}"),
+            Real(f"y_acc{i}"),
+        )
+        for i in range(point_count)
+    ]
+
+    set_option(rational_to_decimal=True)
+    set_option(precision=10)
+
+    init_idx0 = road_idx_lst[0] if road_idx_lst[0] is not None else init_road_idx
+    x0, y0, vx0, vy0, _, _ = waypoints[0]
+    s.add(roads[init_idx0](x0, y0))
+
+    axis0 = x0 if curve_mode == "y_of_x" else y0
+    der0 = _get_derivative(getderivative, axis0, ref_line)
+    _add_heading_constraint(s, vx0, vy0, der0, curve_mode)
+
+    init_pos = x0 if axis_idx == 0 else y0
+    _add_order_constraint(s, init_pos, sampled_roadinfo[init_idx0], road_point_lst[0], 0, save_distance, forward_sign)
+
+    start = time.time()
+
+    for i in range(1, point_count):
+        x1, y1, vx1, vy1, ax1, ay1 = waypoints[i - 1]
+        x2, y2, vx2, vy2, ax2, ay2 = waypoints[i]
+
+        s.add(x2 == x1 + vx1 * seconds_between_points + ax1 / 2 * seconds_between_points ** 2)
+        s.add(y2 == y1 + vy1 * seconds_between_points + ay1 / 2 * seconds_between_points ** 2)
+        s.add(vx2 == vx1 + ax1 * seconds_between_points)
+        s.add(vy2 == vy1 + ay1 * seconds_between_points)
+
+        if forward_axis == "x":
+            s.add(x2 > x1 if forward_sign > 0 else x2 < x1)
+            s.add(vx2 > 0 if forward_sign > 0 else vx2 < 0)
+        else:
+            s.add(y2 > y1 if forward_sign > 0 else y2 < y1)
+            s.add(vy2 > 0 if forward_sign > 0 else vy2 < 0)
+
+        if extra_axis_constraints:
+            for axis_name, axis_sign in extra_axis_constraints:
+                if axis_name == "x":
+                    s.add(x2 > x1 if axis_sign > 0 else x2 < x1)
+                else:
+                    s.add(y2 > y1 if axis_sign > 0 else y2 < y1)
+
+        s.add(If(vx2 > 0, vx2, -vx2) + If(vy2 > 0, vy2, -vy2) < speed_limit)
+
+        cur_idx = road_idx_lst[i]
+        prev_idx = road_idx_lst[i - 1]
+        cur_pos = x2 if axis_idx == 0 else y2
+
+        if cur_idx is None:
+            if transition_use_both_lane_order:
+                prev_real_idx = prev_idx if prev_idx is not None else init_road_idx
+                nxt_real_idx = None
+                for k in range(i + 1, len(road_idx_lst)):
+                    if road_idx_lst[k] is not None:
+                        nxt_real_idx = road_idx_lst[k]
+                        break
+                if nxt_real_idx is None:
+                    nxt_real_idx = prev_real_idx
+
+                _add_order_constraint(
+                    s,
+                    cur_pos,
+                    sampled_roadinfo[prev_real_idx],
+                    point_map.get(prev_real_idx, init_point),
+                    i,
+                    save_distance,
+                    forward_sign,
+                )
+                _add_order_constraint(
+                    s,
+                    cur_pos,
+                    sampled_roadinfo[nxt_real_idx],
+                    point_map.get(nxt_real_idx, dst_point),
+                    i,
+                    save_distance,
+                    forward_sign,
+                )
+            continue
+
+        switched = prev_idx is not None and cur_idx != prev_idx
+
+        if switched and transition_axis_rules:
+            key = f"{prev_idx}->{cur_idx}"
+            rule = transition_axis_rules.get(key)
+            if rule:
+                for axis_name, axis_sign in rule:
+                    if axis_name == "x":
+                        s.add(x2 > x1 if axis_sign > 0 else x2 < x1)
+                    else:
+                        s.add(y2 > y1 if axis_sign > 0 else y2 < y1)
+
+        if not (switched and no_none_switch_skip_lane):
+            s.add(roads[cur_idx](x2, y2))
+            axis_val = x2 if curve_mode == "y_of_x" else y2
+            der = _get_derivative(getderivative, axis_val, ref_line)
+            _add_heading_constraint(s, vx2, vy2, der, curve_mode)
+
+        if no_none_or_clearance and switched:
+            for car in sampled_roadinfo[cur_idx]:
+                if i < len(car):
+                    ref = car[i][axis_idx]
+                    s.add(Or(cur_pos < ref - save_distance, cur_pos > ref + save_distance))
+        else:
+            _add_order_constraint(
+                s,
+                cur_pos,
+                sampled_roadinfo[cur_idx],
+                road_point_lst[i],
+                i,
+                save_distance,
+                forward_sign,
+            )
+
+    set_option("timeout", timeout_ms)
+
+    path = []
+    if s.check() != sat:
+        end = time.time()
+        print("Time:", end - start)
+        print("no solution")
+        return -1
+
+    m = s.model()
+    for waypoint in waypoints[:-1]:
+        x, y, vx, vy, ax, ay = map(lambda var: get_value_of_z3(m, var), waypoint)
+        path.append((x, y, vx, vy))
+        for j in range(1, seconds_between_points):
+            small_x = x + vx * j + 0.5 * ax * j ** 2
+            small_y = y + vy * j + 0.5 * ay * j ** 2
+            small_vx = vx + ax * j
+            small_vy = vy + ay * j
+            path.append((small_x, small_y, small_vx, small_vy))
+    path.append(list(map(lambda var: get_value_of_z3(m, var), waypoints[-1][:-2])))
+
+    end = time.time()
+    print("Time:", end - start)
+
+    name = path_name_template.format(seq=seq, uid=uid)
+    pkl_path = os.path.join(save_dir, "generates", f"{name}.pkl")
+    npy_path = os.path.join(save_dir, "npy", f"{name}.npy")
+    os.makedirs(os.path.dirname(pkl_path), exist_ok=True)
+    os.makedirs(os.path.dirname(npy_path), exist_ok=True)
+    pickle.dump(path, open(pkl_path, "wb"))
+    pkl2npy(pkl_path, npy_path)
+
+    from trajectory_transfer.new_main import transfer
+
+    trajectory_dir = os.path.join(save_dir, "final")
+    os.makedirs(trajectory_dir, exist_ok=True)
+    transfer(seq, npy_path, "".join(name.split("_")), frame_start, trajectory_dir, 1)
+
+    for npc in npcs:
+        npc_full_path = _resolve_npc_path(script_dir, npc)
+        if npc_full_path and os.path.exists(npc_full_path):
+            shutil.copy(npc_full_path, trajectory_dir)
+
+    return 0
