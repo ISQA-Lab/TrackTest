@@ -120,6 +120,9 @@ this loads the seq=1 scene from scene_factory.py, applies runtime overrides (for
 
 ### RQ2: Trajectory Prioritization
 
+To compute the priority score for one trajectory, run the unified metric entry with the trajectory file and optional metric inputs.
+This call evaluates available sub-metrics (angle, jerk, distance, occlusion, truncation) and returns a merged composite_score, which can be used as the trajectory priority score (higher means higher priority).
+
 python -m metric.metric_entry \
   --npy-path data/your_traj.npy \
   --theta-thresh 0.1*pi \
@@ -143,7 +146,7 @@ python -m metric.metric_entry \
 
 ### RQ3: Ablation Study
 
-
+To obtain the results for RQ3, first follow the same procedure used in RQ2 to compute trajectory scores. Then, rank all trajectories based on each individual metric score (e.g., distance, angle, jerk, occlusion, truncation) separately rather than using only a combined score. Finally, perform a correlation analysis between these metric-based rankings (or scores) and the corresponding test outcomes to quantify how strongly each metric is associated with actual performance and to identify which metric is most predictive.
 
 ```
 
