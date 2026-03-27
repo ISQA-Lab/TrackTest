@@ -72,9 +72,21 @@ We have uploaded high-definition GIF examples (`GIF.rar`) and the corresponding 
 
 ## **Experimental Data**
 
-All experimental data is stored at:
+The all data required to reproduce the experiments is stored at::
 
 https://drive.google.com/drive/folders/1SoeTrFn7AuWfXlLqX3ka8jv3sw30e-Ij?usp=drive_link
+
+including:
+
+RQ1: High-definition GIF examples(RQ1_gif_example.rar) and corresponding point cloud-image data(RQ1_example_data.zip);
+
+data.zip:
+
+seed.rar: Required experiment seed files
+
+
+
+------
 
 
 
@@ -92,7 +104,15 @@ https://drive.google.com/drive/folders/1SoeTrFn7AuWfXlLqX3ka8jv3sw30e-Ij?usp=dri
 
 Low-resolution GIF examples have been uploaded to GitHub, and high-resolution GIF examples along with the corresponding point cloud-image data have been uploaded to Google Drive.
 
+To run the trajectory generation path,you should excute like this.
 
+python with_npc_cut_in.py --seq 1 --uid 0 --save_dir outputs/cut_in
+
+or keep retrying until a feasible solution is found:
+
+python with_npc_cut_in.py --seq 1 --uid 0 --save_dir outputs/cut_in --retry
+
+this loads the seq=1 scene from scene_factory.py, applies runtime overrides (for example --start_road_idx if provided), calls generate_cut_in(...) in cut_in_common.py to sample and solve feasible motion constraints, then exports trajectory artifacts (intermediate .pkl/.npy plus transferred final outputs), where a return code of 0 means success and -1 means the current trial is unsatisfied (use --retry to keep trying until success).
 
 ------
 
@@ -100,7 +120,22 @@ Low-resolution GIF examples have been uploaded to GitHub, and high-resolution GI
 
 ### RQ2: Trajectory Prioritization
 
-
+python -m metric.metric_entry \
+  --npy-path data/your_traj.npy \
+  --theta-thresh 0.1*pi \
+  --jerk-thread 2.0 \
+  --distance-directory data/scene_json \
+  --start-frame start_frame \
+  --end-frame 100 \
+  --dis1 5 \
+  --dis2 50 \
+  --occlusion-folder data/occlusion \
+  --label-folder data/label \
+  --occlusion-thresh 0.5 \
+  --truncation-thresh 0.5 \
+  --truncation-folder-path data/truncation \
+  --truncation-trajectory-path data/your_traj.npy \
+  --weights "{\"angle_score\":1,\"jerk_score\":1,\"distance_score\":1,\"occlusion_score\":1,\"truncation_score\":1}"
 
 ------
 
